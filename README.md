@@ -1,41 +1,49 @@
 # pinch
 
-一个零依赖的 Node CLI，用来管理 `~/.openclaw/openclaw.json` 里的第三方 OpenAI 兼容模型。
+一个面向 OpenClaw 的零依赖 Node CLI，用来管理 `~/.openclaw/openclaw.json` 里的第三方 OpenAI 兼容模型。
 
-`pinch` 适合这些场景：
+`pinch` 的目标很简单：**不用手改 JSON，也能完成模型的添加、发现、测试、切换默认模型和安全删除。**
 
-- 快速把新的 OpenAI 兼容模型注册到 OpenClaw
-- 复用已有 provider，自动发现远端可用模型
-- 测试某个已添加模型是否还能正常响应
-- 切换当前默认模型，不手改 JSON
-- 删除模型前检查引用关系，避免误删
+适合这些场景：
+
+- 想快速接入新的 OpenAI 兼容 provider
+- 已经有 provider，想先查看远端有哪些模型可用
+- 想验证某个已配置模型现在还能不能正常响应
+- 想切换默认模型，但不想手动编辑 `openclaw.json`
+- 想删除旧模型，同时避免误删仍被默认模型或 Agent 引用的配置
 
 ## 特性
 
-- 零依赖，直接基于 Node 运行
-- 自动复用已有 provider，或按 `base_url` 生成新的 provider id
-- 支持通过远端 `/models` 自动发现模型并添加
-- 支持按别名或 `modelRef` 测试模型可用性
-- 支持按别名或 `modelRef` 切换默认模型
-- 删除前自动检查 `agents.defaults.model` 和 `agents.list[*].model` 的引用
+- 零依赖，直接基于 Node.js 运行
+- 自动复用已有 provider，或按 `base_url` 自动生成 provider id
+- 支持通过远端 `/models` 自动发现可用模型并添加
+- 支持按模型别名或 `modelRef` 测试模型可用性
+- 支持按模型别名或 `modelRef` 切换默认模型
+- 删除前自动检查 `agents.defaults.model` 和 `agents.list[*].model` 的引用关系
 - 写入前自动备份原始配置文件
 - `list` 会聚合显示 provider 中的模型，并标记当前默认模型
 
 ## 安装
 
-发布到 npm 后：
+### 从 npm 安装
 
 ```bash
-npm install -g pinch
+npm install -g @zkung/pinch
 ```
 
-本地开发或本地安装：
+安装后可直接使用：
+
+```bash
+pinch --help
+```
+
+### 本地开发安装
 
 ```bash
 npm install -g .
 ```
 
-也可以直接在仓库里运行：
+### 不安装直接运行
 
 ```bash
 node bin/pinch.js --help
@@ -49,39 +57,49 @@ node bin/pinch.js --help
 
 ## 快速开始
 
-### 1. 手动添加一个模型
+### 1）手动添加一个模型
 
 ```bash
 pinch add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
 ```
 
-### 2. 从已有 provider 自动发现模型并添加
+### 2）从已有 provider 自动发现模型并添加
 
 ```bash
 pinch add --discover https://api.example.com/v1 gpt-4.1 gpt41
 ```
 
-### 3. 查看当前模型列表和默认模型
+### 3）查看当前模型和默认模型
 
 ```bash
 pinch list
 ```
 
-### 4. 测试某个模型是否可用
+示例输出：
+
+```text
+Current default: gpt41 (provider-a/gpt-4.1)
+DEFAULT  ALIAS  MODEL               NAME     BASE_URL
+-------  -----  ------------------  -------  --------------------------
+yes      gpt41  provider-a/gpt-4.1  gpt-4.1  https://api.example.com/v1
+-        -      provider-a/gpt-4.1-mini  gpt-4.1-mini  https://api.example.com/v1
+```
+
+### 4）测试某个模型是否可用
 
 ```bash
 pinch test gpt41
 pinch test provider-a/gpt-4.1
 ```
 
-### 5. 切换默认模型
+### 5）切换默认模型
 
 ```bash
 pinch default gpt41
 pinch default provider-a/gpt-4.1
 ```
 
-### 6. 删除模型
+### 6）删除模型
 
 ```bash
 pinch del gpt41
@@ -89,7 +107,19 @@ pinch del provider-a/gpt-4.1
 pinch del --force gpt41
 ```
 
-## 命令总览
+## 命令速查
+
+| 命令 | 作用 |
+| --- | --- |
+| `pinch add` | 手动添加模型 |
+| `pinch add --discover` | 从远端 `/models` 发现模型并添加 |
+| `pinch search` | 只查看远端 provider 的可用模型 |
+| `pinch list` | 查看本地配置中的模型和当前默认模型 |
+| `pinch test` | 测试某个模型是否可用 |
+| `pinch default` | 切换默认模型 |
+| `pinch del` | 删除模型配置 |
+
+## 命令说明
 
 ### `pinch add`
 
@@ -97,15 +127,15 @@ pinch del --force gpt41
 
 ```bash
 pinch add <base_url> <api_key> <模型名称> <模型别名>
+pinch add
 ```
 
-如果参数不完整，会自动进入交互输入。
+如果参数不完整，会自动进入交互模式。
 
 示例：
 
 ```bash
 pinch add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
-pinch add
 ```
 
 ### `pinch add --discover`
@@ -121,22 +151,24 @@ pinch add --discover
 
 - `base_url` 必须已经存在于当前配置中
 - 不传模型名称时，会先列出远端可用模型，再交互选择
-- 不传别名时，会默认使用模型名作为别名
+- 不传别名时，会默认使用模型名称作为别名
 
 ### `pinch search`
 
-只搜索远端 provider 上有哪些模型，不写配置。
+只搜索远端 provider 上有哪些模型，不写入配置。
 
 ```bash
 pinch search <base_url>
 pinch search
 ```
 
+适合先查看可用模型，再决定是否 `add --discover`。
+
 ### `pinch list`
 
 聚合显示当前配置里的模型，并标记默认模型。
 
-输出内容包含：
+显示内容包含：
 
 - 当前默认模型
 - 是否为默认模型
@@ -144,6 +176,13 @@ pinch search
 - 模型引用 `providerId/modelId`
 - 模型名称
 - `baseUrl`
+
+`list` 会从这些位置聚合模型信息：
+
+- `models.providers`
+- `agents.defaults.models`
+- `agents.defaults.model`
+- `agents.list[*].model`
 
 ### `pinch test`
 
@@ -201,18 +240,18 @@ pinch del --force <模型别名或模型引用>
 - 如果模型仍在使用中，会拒绝删除
 - 可通过 `--force` 强制删除
 
-## 典型工作流
+## 推荐工作流
 
-### 工作流一：新增一个 provider + 模型
+### 工作流一：新增一个 provider 并启用模型
 
 ```bash
 pinch add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
-pinch list
 pinch test gpt41
 pinch default gpt41
+pinch list
 ```
 
-### 工作流二：从已有 provider 中挑一个模型启用
+### 工作流二：从已有 provider 中挑选一个远端模型启用
 
 ```bash
 pinch search https://api.example.com/v1
@@ -221,7 +260,7 @@ pinch test gpt41mini
 pinch default gpt41mini
 ```
 
-### 工作流三：安全删除一个旧模型
+### 工作流三：安全删除旧模型
 
 ```bash
 pinch list
@@ -241,7 +280,7 @@ pinch --dry-run del gpt41
 
 每次真正写入配置前，都会自动生成备份文件，例如：
 
-```bash
+```text
 ~/.openclaw/openclaw.json.bak.20260307123456
 ```
 
@@ -254,31 +293,28 @@ pinch --dry-run del gpt41
 - `agents.defaults.model.primary`
 - `meta.lastTouchedAt`
 
-`list` 读取时会从以下位置聚合模型信息：
-
-- `models.providers`
-- `agents.defaults.models`
-- `agents.defaults.model`
-- `agents.list[*].model`
-
 ## 常见问题
 
-### 为什么 `add --discover` / `search` 失败？
+### 为什么 `add --discover` 或 `search` 失败？
 
 通常是以下原因之一：
 
 - `base_url` 对应的 provider 还没有录入到配置里
 - 当前 provider 的 `apiKey` 无效
 - 远端服务没有实现兼容的 `/models` 接口
-- Node 版本过低，不支持当前运行所需的 `fetch`
+- Node.js 版本过低，当前运行环境不支持所需的 `fetch`
 
 ### 为什么 `del` 提示模型仍在使用？
 
-因为该模型还被默认模型或某个 Agent 引用。你可以先切换默认模型，或者确认风险后使用：
+因为该模型仍被默认模型或某个 Agent 引用。你可以先切换默认模型，或者确认风险后使用：
 
 ```bash
 pinch del --force <模型别名或模型引用>
 ```
+
+### 为什么 `list` 里有些模型没有别名？
+
+因为 `pinch list` 会从 provider 和引用关系聚合模型，不要求每个模型都已经配置 alias。这样可以避免“模型实际存在，但列表里看不到”的情况。
 
 ## 本地开发
 
