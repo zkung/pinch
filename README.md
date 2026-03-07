@@ -23,10 +23,8 @@
 
 ## 安装
 
-发布到 npm 后：
-
 ```bash
-npm install -g pinch
+npm install -g @zkung/pinch
 ```
 
 本地开发或本地安装：
