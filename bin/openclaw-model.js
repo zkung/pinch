@@ -7,6 +7,9 @@ const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 
 const DEFAULT_CONFIG_PATH = '~/.openclaw/openclaw.json';
+const DISCOVER_REQUEST_TIMEOUT_MS = 15000;
+const MODEL_TEST_REQUEST_TIMEOUT_MS = 30000;
+const DEFAULT_TEST_PROMPT = 'Please reply with OK only.';
 const DEFAULT_MODEL_TEMPLATE = {
   reasoning: false,
   input: ['text'],
@@ -19,7 +22,7 @@ const DEFAULT_MODEL_TEMPLATE = {
   contextWindow: 128000,
   maxTokens: 8192,
 };
-const SUPPORTED_COMMANDS = new Set(['add', 'list', 'del']);
+const SUPPORTED_COMMANDS = new Set(['add', 'list', 'del', 'search', 'test', 'default']);
 
 async function main() {
   try {
@@ -34,8 +37,41 @@ async function main() {
     const config = await loadJson(configPath);
 
     if (parsed.command === 'list') {
-      const entries = listModelsFromConfig(config);
-      printModelList(entries);
+      const listResult = listModelsFromConfig(config);
+      printModelList(listResult);
+      return;
+    }
+
+    if (parsed.command === 'search') {
+      const result = await collectSearchResults(parsed, config);
+      printAvailableModels(result.models, result.providerId, result.provider.baseUrl);
+      return;
+    }
+
+    if (parsed.command === 'test') {
+      const testInput = await collectTestInput(parsed);
+      const result = await testConfiguredModel(config, testInput.selector, testInput.prompt);
+      printTestSummary(result);
+      return;
+    }
+
+    if (parsed.command === 'default') {
+      const alias = await collectDefaultAlias(parsed);
+      const result = setDefaultModelInConfig(config, alias);
+
+      if (parsed.dryRun) {
+        console.log('Dry run only. No files were changed.');
+        printDefaultSummary(result, configPath, null);
+        return;
+      }
+
+      if (!result.changed) {
+        printDefaultSummary(result, configPath, null);
+        return;
+      }
+
+      const backupPath = await saveConfig(configPath, result.config);
+      printDefaultSummary(result, configPath, backupPath);
       return;
     }
 
@@ -54,7 +90,9 @@ async function main() {
       return;
     }
 
-    const answers = await collectAddAnswers(parsed);
+    const answers = parsed.discover
+      ? await collectDiscoveredAddAnswers(parsed, config)
+      : await collectAddAnswers(parsed);
     const result = addModelToConfig(config, answers);
 
     if (parsed.dryRun) {
@@ -76,6 +114,7 @@ function parseArgs(argv) {
     command: 'add',
     positionals: [],
     dryRun: false,
+    discover: false,
     force: false,
     help: false,
   };
@@ -90,6 +129,11 @@ function parseArgs(argv) {
 
     if (value === '--dry-run') {
       options.dryRun = true;
+      continue;
+    }
+
+    if (value === '--discover') {
+      options.discover = true;
       continue;
     }
 
@@ -168,16 +212,111 @@ async function collectAddAnswers(parsed) {
   }
 }
 
-async function collectDeleteAlias(parsed) {
-  const [aliasArg] = parsed.positionals;
-  if (aliasArg) {
-    return normalizeAlias(aliasArg);
+async function collectDiscoveredAddAnswers(parsed, config) {
+  const [baseUrlArg, modelNameArg, modelAliasArg] = parsed.positionals;
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+
+  try {
+    const rawBaseUrl = baseUrlArg || await rl.question('Base URL: ');
+    const baseUrl = normalizeBaseUrl(rawBaseUrl);
+    const discovery = await discoverModelsForBaseUrl(config, baseUrl, rl);
+    const { providerMatch, discoveredModels } = discovery;
+
+    const providedModelName = String(modelNameArg || '').trim();
+    let selectedModel = null;
+
+    if (providedModelName) {
+      selectedModel = discoveredModels.find((model) => model.id === providedModelName) || null;
+      if (!selectedModel) {
+        throw new Error(`在 ${providerMatch.provider.baseUrl} 上未找到模型 ${providedModelName}`);
+      }
+    } else {
+      printAvailableModels(discoveredModels, providerMatch.providerId);
+      selectedModel = await promptForModelSelection(discoveredModels, rl);
+    }
+
+    const suggestedAlias = selectedModel.id;
+    const aliasAnswer = modelAliasArg || await rl.question(`模型别名 [${suggestedAlias}]: `);
+    const modelAlias = String(aliasAnswer || '').trim() || suggestedAlias;
+
+    return normalizeAddAnswers({
+      baseUrl: providerMatch.provider.baseUrl,
+      apiKey: providerMatch.provider.apiKey,
+      modelName: selectedModel.id,
+      modelAlias,
+    });
+  } finally {
+    rl.close();
+  }
+}
+
+async function collectSearchResults(parsed, config) {
+  const [baseUrlArg] = parsed.positionals;
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+
+  try {
+    const rawBaseUrl = baseUrlArg || await rl.question('Base URL: ');
+    const baseUrl = normalizeBaseUrl(rawBaseUrl);
+    const discovery = await discoverModelsForBaseUrl(config, baseUrl, rl);
+
+    return {
+      providerId: discovery.providerMatch.providerId,
+      provider: discovery.providerMatch.provider,
+      models: discovery.discoveredModels,
+    };
+  } finally {
+    rl.close();
+  }
+}
+
+async function collectTestInput(parsed) {
+  const [selectorArg, ...promptParts] = parsed.positionals;
+  const promptArg = promptParts.join(' ').trim();
+
+  if (selectorArg) {
+    return {
+      selector: normalizeModelSelector(selectorArg),
+      prompt: promptArg || DEFAULT_TEST_PROMPT,
+    };
   }
 
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {
-    const alias = await rl.question('模型别名: ');
-    return normalizeAlias(alias);
+    const selector = await rl.question('模型别名或模型引用: ');
+    return {
+      selector: normalizeModelSelector(selector),
+      prompt: DEFAULT_TEST_PROMPT,
+    };
+  } finally {
+    rl.close();
+  }
+}
+
+async function collectDefaultAlias(parsed) {
+  const [selectorArg] = parsed.positionals;
+  if (selectorArg) {
+    return normalizeModelSelector(selectorArg);
+  }
+
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    const selector = await rl.question('默认模型别名或模型引用: ');
+    return normalizeModelSelector(selector);
+  } finally {
+    rl.close();
+  }
+}
+
+async function collectDeleteAlias(parsed) {
+  const [selectorArg] = parsed.positionals;
+  if (selectorArg) {
+    return normalizeModelSelector(selectorArg);
+  }
+
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    const selector = await rl.question('模型别名或模型引用: ');
+    return normalizeModelSelector(selector);
   } finally {
     rl.close();
   }
@@ -210,6 +349,14 @@ function normalizeAlias(value) {
   return alias;
 }
 
+function normalizeModelSelector(value) {
+  const selector = String(value || '').trim();
+  if (!selector) {
+    throw new Error('模型标识不能为空');
+  }
+  return selector;
+}
+
 function normalizeBaseUrl(value) {
   const trimmed = String(value || '').trim();
   if (!trimmed) {
@@ -226,6 +373,404 @@ function normalizeBaseUrl(value) {
   const pathname = parsed.pathname.replace(/\/$/, '');
   parsed.pathname = pathname || '/';
   return parsed.toString().replace(/\/$/, '');
+}
+
+async function selectProviderForDiscovery(config, baseUrl, rl) {
+  ensureConfigContainers(config);
+
+  const matches = findProvidersByBaseUrl(config.models.providers, baseUrl);
+  if (matches.length === 0) {
+    throw new Error(`未找到 baseUrl 为 ${baseUrl} 的 provider，请先用 add 命令录入 API Key`);
+  }
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  if (!stdin.isTTY) {
+    throw new Error(`baseUrl ${baseUrl} 匹配到多个 provider：${matches.map((match) => match.providerId).join(', ')}。请在交互终端中重试并选择 provider`);
+  }
+
+  console.log(`发现多个 provider 使用 ${baseUrl}：`);
+  matches.forEach((match, index) => {
+    console.log(`  ${index + 1}. ${match.providerId}`);
+  });
+
+  while (true) {
+    const answer = String(await rl.question('请选择 provider 序号: ') || '').trim();
+    const selectedIndex = Number(answer);
+
+    if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= matches.length) {
+      return matches[selectedIndex - 1];
+    }
+
+    const selectedById = matches.find((match) => match.providerId === answer);
+    if (selectedById) {
+      return selectedById;
+    }
+
+    console.log('输入无效，请重新输入序号或 provider id。');
+  }
+}
+
+async function discoverModelsForBaseUrl(config, baseUrl, rl) {
+  if (!baseUrl) {
+    throw new Error('Base URL is required');
+  }
+
+  const providerMatch = await selectProviderForDiscovery(config, baseUrl, rl);
+  const discoveredModels = await fetchAvailableModels(providerMatch.provider.baseUrl, providerMatch.provider.apiKey);
+
+  if (discoveredModels.length === 0) {
+    throw new Error(`在 ${providerMatch.provider.baseUrl} 上未发现可用模型`);
+  }
+
+  return { providerMatch, discoveredModels };
+}
+
+async function testConfiguredModel(config, selector, prompt) {
+  const resolved = resolveConfiguredModel(config, selector);
+  const endpointUrl = createChatCompletionsUrl(resolved.provider.baseUrl);
+  const payload = await sendModelTestRequest(endpointUrl, resolved.provider.apiKey, resolved.modelId, prompt);
+  const responsePreview = extractResponsePreview(payload);
+
+  if (!Array.isArray(payload?.choices) && !responsePreview && typeof payload?.id !== 'string') {
+    throw new Error(`接口 ${endpointUrl} 返回成功，但响应结构无法识别`);
+  }
+
+  return {
+    alias: resolved.alias,
+    modelRef: resolved.modelRef,
+    providerId: resolved.providerId,
+    baseUrl: resolved.provider.baseUrl || '',
+    endpointUrl,
+    prompt,
+    responseId: typeof payload?.id === 'string' ? payload.id : '',
+    responsePreview,
+  };
+}
+
+function setDefaultModelInConfig(config, alias) {
+  ensureConfigContainers(config);
+
+  const resolved = resolveConfiguredModel(config, alias);
+  config.agents.defaults.model = config.agents.defaults.model || {};
+  config.agents.defaults.model.fallbacks = Array.isArray(config.agents.defaults.model.fallbacks)
+    ? config.agents.defaults.model.fallbacks
+    : [];
+
+  const previousModelRef = String(config.agents.defaults.model.primary || '');
+  const previousAlias = String(config.agents.defaults.models?.[previousModelRef]?.alias || '').trim();
+  const changed = previousModelRef !== resolved.modelRef;
+
+  if (changed) {
+    config.agents.defaults.model.primary = resolved.modelRef;
+    touchMeta(config);
+  }
+
+  return {
+    config,
+    alias: resolved.alias,
+    modelRef: resolved.modelRef,
+    providerId: resolved.providerId,
+    previousModelRef,
+    previousAlias,
+    changed,
+  };
+}
+
+function resolveConfiguredModel(config, selector) {
+  ensureConfigContainers(config);
+  const normalizedSelector = normalizeModelSelector(selector);
+
+  const exactModelRef = resolveModelRefBySelector(config, normalizedSelector);
+  if (!exactModelRef) {
+    throw new Error(`未找到模型标识为 ${normalizedSelector} 的模型`);
+  }
+
+  return describeResolvedModel(config, exactModelRef);
+}
+
+function resolveModelRefBySelector(config, selector) {
+  const normalizedSelector = normalizeModelSelector(selector);
+  const availableModelRefs = new Set(collectConfiguredModelRefs(config));
+
+  if (availableModelRefs.has(normalizedSelector)) {
+    return normalizedSelector;
+  }
+
+  const matches = Object.entries(config.agents.defaults.models)
+    .filter(([, settings]) => settings && settings.alias === normalizedSelector)
+    .map(([modelRef]) => modelRef);
+
+  if (matches.length === 0) {
+    return '';
+  }
+
+  if (matches.length > 1) {
+    throw new Error(`模型标识 ${normalizedSelector} 匹配到多个模型：${matches.join(', ')}`);
+  }
+
+  return matches[0];
+}
+
+function describeResolvedModel(config, modelRef) {
+  const settings = config.agents.defaults.models?.[modelRef] || null;
+  const [providerId, modelId] = splitModelRef(modelRef);
+  const provider = config.models.providers[providerId];
+
+  if (!provider || typeof provider !== 'object') {
+    throw new Error(`模型 ${modelRef} 对应的 provider ${providerId} 不存在`);
+  }
+
+  return {
+    alias: settings?.alias || '',
+    modelRef,
+    providerId,
+    modelId,
+    provider,
+  };
+}
+
+function findProvidersByBaseUrl(providers, baseUrl) {
+  const targetBaseUrl = normalizeComparableUrl(baseUrl);
+
+  return Object.entries(providers)
+    .filter(([, provider]) => provider && typeof provider === 'object')
+    .filter(([, provider]) => normalizeComparableUrl(provider.baseUrl) === targetBaseUrl)
+    .map(([providerId, provider]) => ({ providerId, provider }));
+}
+
+async function fetchAvailableModels(baseUrl, apiKey) {
+  if (typeof fetch !== 'function') {
+    throw new Error('当前 Node 版本不支持 fetch，无法发现远端模型');
+  }
+
+  const modelsUrl = createModelsUrl(baseUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DISCOVER_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    const payload = parseJsonPayload(responseText, modelsUrl);
+
+    if (!response.ok) {
+      const errorMessage = payload?.error?.message || summarizeResponseText(responseText);
+      throw new Error(`请求 ${modelsUrl} 失败：${response.status} ${response.statusText}${errorMessage ? ` - ${errorMessage}` : ''}`);
+    }
+
+    const discoveredModels = extractDiscoveredModels(payload);
+    if (discoveredModels.length === 0) {
+      throw new Error(`接口 ${modelsUrl} 返回成功，但没有可识别的模型列表`);
+    }
+
+    return discoveredModels;
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error(`请求 ${modelsUrl} 超时`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function createModelsUrl(baseUrl) {
+  return createApiUrl(baseUrl, '/models');
+}
+
+function createChatCompletionsUrl(baseUrl) {
+  return createApiUrl(baseUrl, '/chat/completions');
+}
+
+function createApiUrl(baseUrl, apiPath) {
+  const parsed = new URL(baseUrl);
+  const pathname = parsed.pathname.replace(/\/$/, '');
+  parsed.pathname = `${pathname || ''}${apiPath}`;
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function parseJsonPayload(responseText, sourceUrl) {
+  if (!responseText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    throw new Error(`接口 ${sourceUrl} 返回了非 JSON 内容：${summarizeResponseText(responseText)}`);
+  }
+}
+
+async function sendModelTestRequest(endpointUrl, apiKey, modelId, prompt) {
+  if (typeof fetch !== 'function') {
+    throw new Error('当前 Node 版本不支持 fetch，无法测试模型可用性');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MODEL_TEST_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    const payload = parseJsonPayload(responseText, endpointUrl);
+
+    if (!response.ok) {
+      const errorMessage = payload?.error?.message || summarizeResponseText(responseText);
+      throw new Error(`请求 ${endpointUrl} 失败：${response.status} ${response.statusText}${errorMessage ? ` - ${errorMessage}` : ''}`);
+    }
+
+    return payload;
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error(`请求 ${endpointUrl} 超时`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function summarizeResponseText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+function extractDiscoveredModels(payload) {
+  const entries = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.models)
+        ? payload.models
+        : [];
+
+  const uniqueModels = new Map();
+
+  entries.forEach((entry) => {
+    const modelId = typeof entry === 'string'
+      ? entry
+      : typeof entry?.id === 'string'
+        ? entry.id
+        : typeof entry?.name === 'string'
+          ? entry.name
+          : '';
+
+    if (!modelId || uniqueModels.has(modelId)) {
+      return;
+    }
+
+    uniqueModels.set(modelId, {
+      id: modelId,
+      name: typeof entry?.name === 'string' ? entry.name : '',
+      ownedBy: typeof entry?.owned_by === 'string' ? entry.owned_by : '',
+    });
+  });
+
+  return Array.from(uniqueModels.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function extractResponsePreview(payload) {
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+
+  return normalizeResponseText(choice?.message?.content)
+    || normalizeResponseText(choice?.text)
+    || normalizeResponseText(payload?.output_text)
+    || normalizeResponseText(payload?.content)
+    || '';
+}
+
+function normalizeResponseText(value) {
+  if (typeof value === 'string') {
+    return value.replace(/\s+/g, ' ').trim().slice(0, 200);
+  }
+
+  if (Array.isArray(value)) {
+    const text = value
+      .map((entry) => {
+        if (typeof entry === 'string') {
+          return entry;
+        }
+        if (typeof entry?.text === 'string') {
+          return entry.text;
+        }
+        if (typeof entry?.content === 'string') {
+          return entry.content;
+        }
+        return '';
+      })
+      .filter(Boolean)
+      .join(' ');
+
+    return text.replace(/\s+/g, ' ').trim().slice(0, 200);
+  }
+
+  return '';
+}
+
+function printAvailableModels(models, providerId, baseUrl) {
+  console.log(`在 provider ${providerId} 上发现以下模型：`);
+  if (baseUrl) {
+    console.log(`Base URL: ${baseUrl}`);
+  }
+  models.forEach((model, index) => {
+    const details = [];
+    if (model.name && model.name !== model.id) {
+      details.push(`name=${model.name}`);
+    }
+    if (model.ownedBy) {
+      details.push(`owned_by=${model.ownedBy}`);
+    }
+
+    const suffix = details.length > 0 ? ` (${details.join(', ')})` : '';
+    console.log(`  ${index + 1}. ${model.id}${suffix}`);
+  });
+}
+
+async function promptForModelSelection(models, rl) {
+  while (true) {
+    const answer = String(await rl.question('模型名称或序号: ') || '').trim();
+    const selectedIndex = Number(answer);
+
+    if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= models.length) {
+      return models[selectedIndex - 1];
+    }
+
+    const selectedById = models.find((model) => model.id === answer);
+    if (selectedById) {
+      return selectedById;
+    }
+
+    console.log('输入无效，请重新输入模型序号或完整模型名称。');
+  }
 }
 
 async function loadJson(filePath) {
@@ -300,52 +845,131 @@ function addModelToConfig(config, answers) {
 }
 
 function listModelsFromConfig(config) {
-  const modelEntries = Object.entries(config?.agents?.defaults?.models || {})
-    .filter(([, settings]) => settings && settings.alias);
+  const currentPrimary = String(config?.agents?.defaults?.model?.primary || '').trim();
+  const modelRefs = collectConfiguredModelRefs(config);
 
-  return modelEntries
-    .map(([modelRef, settings]) => {
-      const [providerId, modelId] = splitModelRef(modelRef);
-      const provider = config?.models?.providers?.[providerId];
-      const providerModels = Array.isArray(provider?.models) ? provider.models : [];
-      const model = providerModels.find((entry) => entry && entry.id === modelId);
+  const entries = modelRefs
+    .map((modelRef) => {
+      const settings = config?.agents?.defaults?.models?.[modelRef] || null;
+      const resolved = describeConfiguredModel(config, modelRef);
 
       return {
         alias: settings?.alias || '',
         modelRef,
-        modelName: model?.name || modelId,
-        providerId,
-        baseUrl: provider?.baseUrl || '',
+        modelName: resolved.modelName,
+        providerId: resolved.providerId,
+        baseUrl: resolved.baseUrl,
+        isDefault: modelRef === currentPrimary,
       };
     })
     .sort((left, right) => {
+      if (left.isDefault !== right.isDefault) {
+        return left.isDefault ? -1 : 1;
+      }
+
       const aliasOrder = (left.alias || '~').localeCompare(right.alias || '~');
       if (aliasOrder !== 0) {
         return aliasOrder;
       }
       return left.modelRef.localeCompare(right.modelRef);
     });
+
+  return {
+    entries,
+    currentDefault: currentPrimary ? describeCurrentDefaultModel(config, currentPrimary) : null,
+  };
 }
 
-function deleteModelFromConfig(config, alias, options = {}) {
+function collectConfiguredModelRefs(config) {
+  const modelRefs = new Set();
+
+  const providers = config?.models?.providers || {};
+  Object.entries(providers).forEach(([providerId, provider]) => {
+    const models = Array.isArray(provider?.models) ? provider.models : [];
+    models.forEach((model) => {
+      if (model && typeof model.id === 'string' && model.id.trim()) {
+        modelRefs.add(`${providerId}/${model.id}`);
+      }
+    });
+  });
+
+  Object.keys(config?.agents?.defaults?.models || {}).forEach((modelRef) => {
+    if (modelRef) {
+      modelRefs.add(modelRef);
+    }
+  });
+
+  const defaultPrimary = String(config?.agents?.defaults?.model?.primary || '').trim();
+  if (defaultPrimary) {
+    modelRefs.add(defaultPrimary);
+  }
+
+  const defaultFallbacks = Array.isArray(config?.agents?.defaults?.model?.fallbacks)
+    ? config.agents.defaults.model.fallbacks
+    : [];
+  defaultFallbacks.forEach((modelRef) => {
+    if (modelRef) {
+      modelRefs.add(modelRef);
+    }
+  });
+
+  const agentList = Array.isArray(config?.agents?.list) ? config.agents.list : [];
+  agentList.forEach((agent) => {
+    const primary = String(agent?.model?.primary || '').trim();
+    if (primary) {
+      modelRefs.add(primary);
+    }
+
+    const fallbacks = Array.isArray(agent?.model?.fallbacks) ? agent.model.fallbacks : [];
+    fallbacks.forEach((modelRef) => {
+      if (modelRef) {
+        modelRefs.add(modelRef);
+      }
+    });
+  });
+
+  return Array.from(modelRefs);
+}
+
+function describeConfiguredModel(config, modelRef) {
+  const [providerId, modelId] = splitModelRef(modelRef);
+  const provider = config?.models?.providers?.[providerId];
+  const providerModels = Array.isArray(provider?.models) ? provider.models : [];
+  const model = providerModels.find((entry) => entry && entry.id === modelId);
+
+  return {
+    providerId,
+    modelId,
+    modelName: model?.name || modelId,
+    baseUrl: provider?.baseUrl || '',
+  };
+}
+
+function describeCurrentDefaultModel(config, modelRef) {
+  const resolved = describeConfiguredModel(config, modelRef);
+  const alias = String(config?.agents?.defaults?.models?.[modelRef]?.alias || '').trim();
+
+  return {
+    alias,
+    modelRef,
+    modelName: resolved.modelName,
+    providerId: resolved.providerId,
+    baseUrl: resolved.baseUrl,
+  };
+}
+
+function deleteModelFromConfig(config, selector, options = {}) {
   ensureConfigContainers(config);
 
-  const matches = Object.entries(config.agents.defaults.models)
-    .filter(([, settings]) => settings && settings.alias === alias)
-    .map(([modelRef]) => modelRef);
-
-  if (matches.length === 0) {
-    throw new Error(`未找到别名为 ${alias} 的模型`);
+  const modelRef = resolveModelRefBySelector(config, selector);
+  if (!modelRef) {
+    throw new Error(`未找到模型标识为 ${selector} 的模型`);
   }
 
-  if (matches.length > 1) {
-    throw new Error(`别名 ${alias} 匹配到多个模型：${matches.join(', ')}`);
-  }
-
-  const [modelRef] = matches;
+  const resolved = describeResolvedModel(config, modelRef);
   const usages = findModelUsages(config, modelRef);
   if (usages.length > 0 && !options.force) {
-    throw new Error(`模型别名 ${alias} 当前正在被使用：${usages.join(', ')}。请先切换默认模型或 Agent 模型，或使用 --force 强制删除`);
+    throw new Error(`模型 ${modelRef} 当前正在被使用：${usages.join(', ')}。请先切换默认模型或 Agent 模型，或使用 --force 强制删除`);
   }
 
   const [providerId, modelId] = splitModelRef(modelRef);
@@ -370,7 +994,7 @@ function deleteModelFromConfig(config, alias, options = {}) {
 
   return {
     config,
-    alias,
+    alias: resolved.alias,
     modelRef,
     providerId,
     modelRemoved,
@@ -543,7 +1167,7 @@ function printAddSummary(result, configPath, backupPath) {
 }
 
 function printDeleteSummary(result, configPath, backupPath) {
-  console.log(`Alias removed: ${result.alias}`);
+  console.log(`Alias removed: ${result.alias || '-'}`);
   console.log(`Model removed: ${result.modelRef}`);
   console.log(`Provider removed: ${result.providerRemoved ? result.providerId : 'no'}`);
   console.log(`Forced delete: ${result.forced ? 'yes' : 'no'}`);
@@ -559,13 +1183,61 @@ function printDeleteSummary(result, configPath, backupPath) {
   }
 }
 
-function printModelList(entries) {
+function printDefaultSummary(result, configPath, backupPath) {
+  console.log(`Default alias: ${result.alias || '-'}`);
+  console.log(`${result.changed ? 'Default model set' : 'Default model unchanged'}: ${result.modelRef}`);
+
+  if (result.previousModelRef && result.previousModelRef !== result.modelRef) {
+    const previousLabel = result.previousAlias
+      ? `${result.previousAlias} (${result.previousModelRef})`
+      : result.previousModelRef;
+    console.log(`Previous default: ${previousLabel}`);
+  }
+
+  console.log(`Config path: ${configPath}`);
+
+  if (backupPath) {
+    console.log(`Backup path: ${backupPath}`);
+  }
+}
+
+function printTestSummary(result) {
+  console.log(`Alias tested: ${result.alias || '-'}`);
+  console.log(`Model tested: ${result.modelRef}`);
+  console.log(`Provider used: ${result.providerId}`);
+  console.log(`Base URL: ${result.baseUrl}`);
+  console.log(`Endpoint used: ${result.endpointUrl}`);
+  console.log('Test result: ok');
+
+  if (result.responseId) {
+    console.log(`Response id: ${result.responseId}`);
+  }
+
+  if (result.responsePreview) {
+    console.log(`Response preview: ${result.responsePreview}`);
+  }
+}
+
+function printModelList(result) {
+  const entries = Array.isArray(result?.entries) ? result.entries : [];
+  const currentDefault = result?.currentDefault || null;
+
+  if (currentDefault) {
+    const currentDefaultLabel = currentDefault.alias
+      ? `${currentDefault.alias} (${currentDefault.modelRef})`
+      : currentDefault.modelRef;
+    console.log(`Current default: ${currentDefaultLabel}`);
+  } else {
+    console.log('Current default: -');
+  }
+
   if (entries.length === 0) {
     console.log('No configured models found.');
     return;
   }
 
   const columns = [
+    ['defaultMark', 'DEFAULT'],
     ['alias', 'ALIAS'],
     ['modelRef', 'MODEL'],
     ['modelName', 'NAME'],
@@ -573,6 +1245,7 @@ function printModelList(entries) {
   ];
 
   const rows = entries.map((entry) => ({
+    defaultMark: entry.isDefault ? 'yes' : '-',
     alias: entry.alias || '-',
     modelRef: entry.modelRef || '-',
     modelName: entry.modelName || '-',
@@ -590,6 +1263,7 @@ function printModelList(entries) {
     .replace(/\s+$/, '');
 
   console.log(formatRow({
+    defaultMark: 'DEFAULT',
     alias: 'ALIAS',
     modelRef: 'MODEL',
     modelName: 'NAME',
@@ -621,24 +1295,44 @@ function printHelp() {
 
 用法:
   openclaw-model add <base_url> <api_key> <模型名称> <模型别名>
+  openclaw-model add --discover <base_url> <模型名称> <模型别名>
   openclaw-model add
+  openclaw-model add --discover
   openclaw-model list
-  openclaw-model del <模型别名>
+  openclaw-model search <base_url>
+  openclaw-model search
+  openclaw-model test <模型别名或模型引用> [测试提示词]
+  openclaw-model test
+  openclaw-model default <模型别名或模型引用>
+  openclaw-model default
+  openclaw-model del <模型别名或模型引用>
   openclaw-model del
-  openclaw-model del --force <模型别名>
+  openclaw-model del --force <模型别名或模型引用>
   openclaw-model --config /path/to/openclaw.json --dry-run add
-  openclaw-model --config /path/to/openclaw.json --dry-run del <模型别名>
+  openclaw-model --config /path/to/openclaw.json --dry-run add --discover <base_url> <模型名称> <模型别名>
+  openclaw-model --config /path/to/openclaw.json --dry-run default <模型别名或模型引用>
+  openclaw-model --config /path/to/openclaw.json --dry-run del <模型别名或模型引用>
 
 示例:
   openclaw-model add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
+  openclaw-model add --discover https://api.example.com/v1 gpt-4.1 gpt41
+  openclaw-model search https://api.example.com/v1
+  openclaw-model test gpt41
+  openclaw-model test provider-a/gpt-4.1
+  openclaw-model default gpt41
+  openclaw-model default provider-a/gpt-4.1
   openclaw-model list
   openclaw-model del gpt41
   openclaw-model del --force gpt41
 
 说明:
   - add 仅需输入 base_url、api_key、模型名称、模型别名
-  - list 会列出 agents.defaults.models 中已登记且带别名的模型
-  - del 会按模型别名删除 models.providers 和 agents.defaults.models 中对应条目
+  - add --discover 会复用已保存的 provider，并调用 <base_url>/models 搜索远端模型
+  - search 会复用已保存的 provider，并调用 <base_url>/models 列出远端可用模型
+  - test 会按模型别名或模型引用找到已配置模型，并调用 <base_url>/chat/completions 验证可用性
+  - default 会按模型别名或模型引用切换 agents.defaults.model.primary
+  - list 会从 models.providers、agents.defaults.models 和当前引用关系聚合模型，并标记当前默认模型
+  - del 会按模型别名或模型引用删除 models.providers 和 agents.defaults.models 中对应条目
   - 若模型正被 agents.defaults.model 或 agents.list[*].model 使用，del 会拒绝删除；可用 --force 覆盖
   - 若同一个 base_url + api_key 已存在，会复用现有 provider
   - 若 provider 不存在，会自动生成 provider id
