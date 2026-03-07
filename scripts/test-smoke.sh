@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-node bin/openclaw-model.js --help >/dev/null
+node bin/pinch.js --help >/dev/null
 
 tmpdir=$(mktemp -d)
 cleanup() {
@@ -32,14 +32,14 @@ cat > "$config" <<'JSON'
 }
 JSON
 
-node bin/openclaw-model.js --config "$config" add https://api.example.com/v1 sk-test gpt-4.1 gpt41 >/dev/null
-list_output=$(node bin/openclaw-model.js --config "$config" list)
+node bin/pinch.js --config "$config" add https://api.example.com/v1 sk-test gpt-4.1 gpt41 >/dev/null
+list_output=$(node bin/pinch.js --config "$config" list)
 printf '%s\n' "$list_output" | grep 'gpt41' >/dev/null
 printf '%s\n' "$list_output" | grep 'Current default: gpt41 (api-example-com-v1/gpt-4.1)' >/dev/null
 printf '%s\n' "$list_output" | grep 'yes[[:space:]]*gpt41' >/dev/null
 
 set +e
-protected_output=$(node bin/openclaw-model.js --config "$config" del gpt41 2>&1)
+protected_output=$(node bin/pinch.js --config "$config" del gpt41 2>&1)
 protected_rc=$?
 set -e
 
@@ -49,9 +49,9 @@ if [ "$protected_rc" -eq 0 ]; then
 fi
 printf '%s\n' "$protected_output" | grep 'agents.defaults.model.primary' >/dev/null
 
-node bin/openclaw-model.js --config "$config" del --force gpt41 >/dev/null
+node bin/pinch.js --config "$config" del --force gpt41 >/dev/null
 
-if node bin/openclaw-model.js --config "$config" list | grep -q 'gpt41'; then
+if node bin/pinch.js --config "$config" list | grep -q 'gpt41'; then
   echo 'alias should have been removed' >&2
   exit 1
 fi
@@ -88,22 +88,22 @@ cat > "$provider_only_config" <<'JSON'
 }
 JSON
 
-provider_only_output=$(node bin/openclaw-model.js --config "$provider_only_config" list)
+provider_only_output=$(node bin/pinch.js --config "$provider_only_config" list)
 printf '%s\n' "$provider_only_output" | grep 'Current default: x666-me-v1/gpt-5.4' >/dev/null
 printf '%s\n' "$provider_only_output" | grep 'yes[[:space:]]*-[[:space:]]*x666-me-v1/gpt-5.4' >/dev/null
 printf '%s\n' "$provider_only_output" | grep 'x666-me-v1/gpt-5.4-mini' >/dev/null
 
-provider_only_default_output=$(node bin/openclaw-model.js --config "$provider_only_config" default x666-me-v1/gpt-5.4-mini)
+provider_only_default_output=$(node bin/pinch.js --config "$provider_only_config" default x666-me-v1/gpt-5.4-mini)
 printf '%s\n' "$provider_only_default_output" | grep 'Default model set: x666-me-v1/gpt-5.4-mini' >/dev/null
 
-provider_only_after_default=$(node bin/openclaw-model.js --config "$provider_only_config" list)
+provider_only_after_default=$(node bin/pinch.js --config "$provider_only_config" list)
 printf '%s\n' "$provider_only_after_default" | grep 'Current default: x666-me-v1/gpt-5.4-mini' >/dev/null
 printf '%s\n' "$provider_only_after_default" | grep 'yes[[:space:]]*-[[:space:]]*x666-me-v1/gpt-5.4-mini' >/dev/null
 
-provider_only_delete_output=$(node bin/openclaw-model.js --config "$provider_only_config" del x666-me-v1/gpt-5.4)
+provider_only_delete_output=$(node bin/pinch.js --config "$provider_only_config" del x666-me-v1/gpt-5.4)
 printf '%s\n' "$provider_only_delete_output" | grep 'Model removed: x666-me-v1/gpt-5.4' >/dev/null
 
-provider_only_after_delete=$(node bin/openclaw-model.js --config "$provider_only_config" list)
+provider_only_after_delete=$(node bin/pinch.js --config "$provider_only_config" list)
 if printf '%s\n' "$provider_only_after_delete" | grep -q 'x666-me-v1/gpt-5.4[[:space:]]'; then
   echo 'modelRef delete should remove provider-only model' >&2
   exit 1
@@ -234,24 +234,24 @@ cat > "$discover_config" <<JSON
 }
 JSON
 
-search_output=$(node bin/openclaw-model.js --config "$discover_config" search "http://127.0.0.1:$port/v1")
+search_output=$(node bin/pinch.js --config "$discover_config" search "http://127.0.0.1:$port/v1")
 printf '%s\n' "$search_output" | grep 'claude-3.7-sonnet' >/dev/null
 printf '%s\n' "$search_output" | grep 'gpt-4.1-mini' >/dev/null
 
-node bin/openclaw-model.js --config "$discover_config" add --discover "http://127.0.0.1:$port/v1" claude-3.7-sonnet claude37 >/dev/null
+node bin/pinch.js --config "$discover_config" add --discover "http://127.0.0.1:$port/v1" claude-3.7-sonnet claude37 >/dev/null
 
-default_output=$(node bin/openclaw-model.js --config "$discover_config" default claude37)
+default_output=$(node bin/pinch.js --config "$discover_config" default claude37)
 printf '%s\n' "$default_output" | grep 'Default model set: discover-provider/claude-3.7-sonnet' >/dev/null
 
-test_output=$(node bin/openclaw-model.js --config "$discover_config" test claude37)
+test_output=$(node bin/pinch.js --config "$discover_config" test claude37)
 printf '%s\n' "$test_output" | grep 'Test result: ok' >/dev/null
 printf '%s\n' "$test_output" | grep 'Response preview: OK' >/dev/null
 
-test_output_by_ref=$(node bin/openclaw-model.js --config "$discover_config" test discover-provider/claude-3.7-sonnet)
+test_output_by_ref=$(node bin/pinch.js --config "$discover_config" test discover-provider/claude-3.7-sonnet)
 printf '%s\n' "$test_output_by_ref" | grep 'Model tested: discover-provider/claude-3.7-sonnet' >/dev/null
 printf '%s\n' "$test_output_by_ref" | grep 'Test result: ok' >/dev/null
 
-discover_output=$(node bin/openclaw-model.js --config "$discover_config" list)
+discover_output=$(node bin/pinch.js --config "$discover_config" list)
 printf '%s\n' "$discover_output" | grep 'Current default: claude37 (discover-provider/claude-3.7-sonnet)' >/dev/null
 printf '%s\n' "$discover_output" | grep 'yes[[:space:]]*claude37' >/dev/null
 printf '%s\n' "$discover_output" | grep 'claude37' >/dev/null

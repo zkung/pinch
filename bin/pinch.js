@@ -1289,41 +1289,41 @@ function padDisplay(value, targetWidth) {
 }
 
 function printHelp() {
-  console.log(`openclaw-model
+  console.log(`pinch
 
 为 OpenClaw 的 ~/.openclaw/openclaw.json 管理第三方模型。
 
 用法:
-  openclaw-model add <base_url> <api_key> <模型名称> <模型别名>
-  openclaw-model add --discover <base_url> <模型名称> <模型别名>
-  openclaw-model add
-  openclaw-model add --discover
-  openclaw-model list
-  openclaw-model search <base_url>
-  openclaw-model search
-  openclaw-model test <模型别名或模型引用> [测试提示词]
-  openclaw-model test
-  openclaw-model default <模型别名或模型引用>
-  openclaw-model default
-  openclaw-model del <模型别名或模型引用>
-  openclaw-model del
-  openclaw-model del --force <模型别名或模型引用>
-  openclaw-model --config /path/to/openclaw.json --dry-run add
-  openclaw-model --config /path/to/openclaw.json --dry-run add --discover <base_url> <模型名称> <模型别名>
-  openclaw-model --config /path/to/openclaw.json --dry-run default <模型别名或模型引用>
-  openclaw-model --config /path/to/openclaw.json --dry-run del <模型别名或模型引用>
+  pinch add <base_url> <api_key> <模型名称> <模型别名>
+  pinch add --discover <base_url> <模型名称> <模型别名>
+  pinch add
+  pinch add --discover
+  pinch list
+  pinch search <base_url>
+  pinch search
+  pinch test <模型别名或模型引用> [测试提示词]
+  pinch test
+  pinch default <模型别名或模型引用>
+  pinch default
+  pinch del <模型别名或模型引用>
+  pinch del
+  pinch del --force <模型别名或模型引用>
+  pinch --config /path/to/openclaw.json --dry-run add
+  pinch --config /path/to/openclaw.json --dry-run add --discover <base_url> <模型名称> <模型别名>
+  pinch --config /path/to/openclaw.json --dry-run default <模型别名或模型引用>
+  pinch --config /path/to/openclaw.json --dry-run del <模型别名或模型引用>
 
 示例:
-  openclaw-model add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
-  openclaw-model add --discover https://api.example.com/v1 gpt-4.1 gpt41
-  openclaw-model search https://api.example.com/v1
-  openclaw-model test gpt41
-  openclaw-model test provider-a/gpt-4.1
-  openclaw-model default gpt41
-  openclaw-model default provider-a/gpt-4.1
-  openclaw-model list
-  openclaw-model del gpt41
-  openclaw-model del --force gpt41
+  pinch add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
+  pinch add --discover https://api.example.com/v1 gpt-4.1 gpt41
+  pinch search https://api.example.com/v1
+  pinch test gpt41
+  pinch test provider-a/gpt-4.1
+  pinch default gpt41
+  pinch default provider-a/gpt-4.1
+  pinch list
+  pinch del gpt41
+  pinch del --force gpt41
 
 说明:
   - add 仅需输入 base_url、api_key、模型名称、模型别名

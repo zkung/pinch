@@ -1,12 +1,12 @@
 {
-  "name": "openclaw-model-cli",
+  "name": "@zkung/pinch",
   "version": "0.1.0",
-  "description": "CLI for managing third-party OpenClaw models in ~/.openclaw/openclaw.json",
+  "description": "Pinch CLI for managing third-party OpenClaw models in ~/.openclaw/openclaw.json",
   "bin": {
-    "openclaw-model": "bin/openclaw-model.js"
+    "pinch": "bin/pinch.js"
   },
   "scripts": {
-    "start": "node bin/openclaw-model.js",
+    "start": "node bin/pinch.js",
     "test:smoke": "sh scripts/test-smoke.sh"
   },
   "license": "UNLICENSED"
