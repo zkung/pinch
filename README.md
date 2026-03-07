@@ -1,6 +1,10 @@
 # pinch
 
 一个零依赖的 Node CLI，用来管理 `~/.openclaw/openclaw.json` 里的第三方 OpenAI 兼容模型。
+后续需手动openclaw网关重启
+```bash
+openclaw gateway restart
+```
 
 `pinch` 适合这些场景：
 
