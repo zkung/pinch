@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-model-cli",
+  "version": "0.1.0",
+  "description": "CLI for managing third-party OpenClaw models in ~/.openclaw/openclaw.json",
+  "bin": {
+    "openclaw-model": "bin/openclaw-model.js"
+  },
+  "scripts": {
+    "start": "node bin/openclaw-model.js",
+    "test:smoke": "sh scripts/test-smoke.sh"
+  },
+  "license": "UNLICENSED"
+}
