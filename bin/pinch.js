@@ -23,6 +23,9 @@ const DEFAULT_MODEL_TEMPLATE = {
   maxTokens: 8192,
 };
 const SUPPORTED_COMMANDS = new Set(['add', 'list', 'del', 'search', 'test', 'default']);
+const COMMAND_ALIASES = new Map([
+  ['dafault', 'default'],
+]);
 
 async function main() {
   try {
@@ -157,15 +160,103 @@ function parseArgs(argv) {
       continue;
     }
 
-    if (SUPPORTED_COMMANDS.has(value) && options.command === 'add' && options.positionals.length === 0) {
-      options.command = value;
-      continue;
+    if (options.command === 'add' && options.positionals.length === 0) {
+      const resolvedCommand = resolveCommandToken(value);
+      if (resolvedCommand) {
+        options.command = resolvedCommand;
+        continue;
+      }
+
+      if (!looksLikeBaseUrlToken(value)) {
+        const suggestion = findSuggestedCommand(value);
+        throw new Error(
+          suggestion
+            ? `Unknown command: ${value}. Did you mean "${suggestion}"?`
+            : `Unknown command: ${value}`,
+        );
+      }
     }
 
     options.positionals.push(value);
   }
 
   return options;
+}
+
+function resolveCommandToken(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (SUPPORTED_COMMANDS.has(normalized)) {
+    return normalized;
+  }
+
+  return COMMAND_ALIASES.get(normalized) || '';
+}
+
+function looksLikeBaseUrlToken(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /:\/\//.test(trimmed) || /[./:]/.test(trimmed);
+}
+
+function findSuggestedCommand(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  let closestCommand = '';
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  for (const command of SUPPORTED_COMMANDS) {
+    const distance = computeLevenshteinDistance(normalized, command);
+    if (distance < closestDistance) {
+      closestCommand = command;
+      closestDistance = distance;
+    }
+  }
+
+  return closestDistance <= 2 ? closestCommand : '';
+}
+
+function computeLevenshteinDistance(left, right) {
+  if (left === right) {
+    return 0;
+  }
+
+  if (!left) {
+    return right.length;
+  }
+
+  if (!right) {
+    return left.length;
+  }
+
+  const distances = Array.from({ length: right.length + 1 }, (_, index) => index);
+
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let previousDiagonal = distances[0];
+    distances[0] = leftIndex;
+
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const current = distances[rightIndex];
+      const substitutionCost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      distances[rightIndex] = Math.min(
+        distances[rightIndex] + 1,
+        distances[rightIndex - 1] + 1,
+        previousDiagonal + substitutionCost,
+      );
+      previousDiagonal = current;
+    }
+  }
+
+  return distances[right.length];
 }
 
 async function collectAddAnswers(parsed) {

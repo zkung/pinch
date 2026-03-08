@@ -38,6 +38,20 @@ printf '%s\n' "$list_output" | grep 'gpt41' >/dev/null
 printf '%s\n' "$list_output" | grep 'Current default: gpt41 (api-example-com-v1/gpt-4.1)' >/dev/null
 printf '%s\n' "$list_output" | grep 'yes[[:space:]]*gpt41' >/dev/null
 
+default_typo_output=$(node bin/pinch.js --config "$config" dafault gpt41)
+printf '%s\n' "$default_typo_output" | grep 'Default model unchanged: api-example-com-v1/gpt-4.1' >/dev/null
+
+set +e
+unknown_command_output=$(node bin/pinch.js --config "$config" serach 2>&1)
+unknown_command_rc=$?
+set -e
+
+if [ "$unknown_command_rc" -eq 0 ]; then
+  echo 'unknown command should fail' >&2
+  exit 1
+fi
+printf '%s\n' "$unknown_command_output" | grep 'Did you mean "search"' >/dev/null
+
 set +e
 protected_output=$(node bin/pinch.js --config "$config" del gpt41 2>&1)
 protected_rc=$?

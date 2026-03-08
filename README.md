@@ -2,6 +2,12 @@
 
 一个面向 OpenClaw 的零依赖 Node CLI，用来管理 `~/.openclaw/openclaw.json` 里的第三方 OpenAI 兼容模型。
 
+后续需手动重启 OpenClaw 网关：
+
+```bash
+openclaw gateway restart
+```
+
 `pinch` 的目标很简单：**不用手改 JSON，也能完成模型的添加、发现、测试、切换默认模型和安全删除。**
 
 适合这些场景：
@@ -211,6 +217,8 @@ pinch test provider-a/gpt-4.1 "Reply with OK only."
 ### `pinch default`
 
 切换当前默认模型，也就是更新 `agents.defaults.model.primary`。
+
+兼容常见手误：`pinch dafault <模型别名或模型引用>` 也会按 `default` 处理。
 
 ```bash
 pinch default <模型别名或模型引用>
