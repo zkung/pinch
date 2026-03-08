@@ -1,6 +1,6 @@
 {
   "name": "@zkung/pinch",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Pinch CLI for managing third-party OpenClaw models in ~/.openclaw/openclaw.json",
   "bin": {
     "pinch": "bin/pinch.js"

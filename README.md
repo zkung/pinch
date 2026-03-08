@@ -8,7 +8,7 @@
 openclaw gateway restart
 ```
 
-`pinch` 的目标很简单：**不用手改 JSON，也能完成模型的添加、发现、测试、切换默认模型和安全删除。**
+`pinch` 的目标很简单：**不用手改 JSON，也能完成模型的添加、发现、测试、切换默认模型、安全删除和备份恢复。**
 
 适合这些场景：
 
@@ -17,6 +17,7 @@ openclaw gateway restart
 - 想验证某个已配置模型现在还能不能正常响应
 - 想切换默认模型，但不想手动编辑 `openclaw.json`
 - 想删除旧模型，同时避免误删仍被默认模型或 Agent 引用的配置
+- 想查看 `openclaw.json.bak.*` 备份、手动补一份备份，或回滚到某次备份
 
 ## 特性
 
@@ -27,6 +28,7 @@ openclaw gateway restart
 - 支持按模型别名或 `modelRef` 切换默认模型
 - 删除前自动检查 `agents.defaults.model` 和 `agents.list[*].model` 的引用关系
 - 写入前自动备份原始配置文件
+- 支持列出、查看、手动创建和恢复 `openclaw.json.bak.*` 备份
 - `list` 会聚合显示 provider 中的模型，并标记当前默认模型
 
 ## 安装
@@ -113,6 +115,15 @@ pinch del provider-a/gpt-4.1
 pinch del --force gpt41
 ```
 
+### 7）查看和恢复备份
+
+```bash
+pinch backup
+pinch backup show 20260307123456
+pinch backup add
+pinch backup restore 20260307123456
+```
+
 ## 命令速查
 
 | 命令 | 作用 |
@@ -124,6 +135,7 @@ pinch del --force gpt41
 | `pinch test` | 测试某个模型是否可用 |
 | `pinch default` | 切换默认模型 |
 | `pinch del` | 删除模型配置 |
+| `pinch backup` | 管理当前配置文件的备份 |
 
 ## 命令说明
 
@@ -248,6 +260,26 @@ pinch del --force <模型别名或模型引用>
 - 如果模型仍在使用中，会拒绝删除
 - 可通过 `--force` 强制删除
 
+### `pinch backup`
+
+管理当前配置文件对应的备份文件，默认目标仍是 `~/.openclaw/openclaw.json`，也支持配合 `--config` 使用。
+
+```bash
+pinch backup
+pinch backup list
+pinch backup show <备份时间戳|备份文件名|备份路径>
+pinch backup add
+pinch backup restore <备份时间戳|备份文件名|备份路径>
+```
+
+说明：
+
+- `pinch backup` 与 `pinch backup list` 等价，会列出当前配置文件对应的所有备份
+- `show` 支持传 14 位备份时间戳、完整备份文件名、或完整/相对路径
+- `add` 会手动创建一份新备份，但不会修改当前配置内容
+- `restore` 会先校验备份 JSON，再覆盖当前配置文件
+- 如果当前配置文件存在，`restore` 之前会先自动再备份一次现场配置，避免误覆盖
+
 ## 推荐工作流
 
 ### 工作流一：新增一个 provider 并启用模型
@@ -284,6 +316,8 @@ pinch del --force gpt41
 pinch --dry-run add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
 pinch --dry-run default gpt41
 pinch --dry-run del gpt41
+pinch --dry-run backup add
+pinch --dry-run backup restore 20260307123456
 ```
 
 每次真正写入配置前，都会自动生成备份文件，例如：
@@ -291,6 +325,8 @@ pinch --dry-run del gpt41
 ```text
 ~/.openclaw/openclaw.json.bak.20260307123456
 ```
+
+也可以通过 `pinch backup list` 查看所有备份，并用 `pinch backup show` / `pinch backup restore` 做内容检查或回滚。
 
 ## 配置文件说明
 

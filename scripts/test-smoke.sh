@@ -124,6 +124,57 @@ if printf '%s\n' "$provider_only_after_delete" | grep -q 'x666-me-v1/gpt-5.4[[:s
 fi
 printf '%s\n' "$provider_only_after_delete" | grep 'x666-me-v1/gpt-5.4-mini' >/dev/null
 
+backup_config="$tmpdir/backup.json"
+
+cat > "$backup_config" <<'JSON'
+{
+  "meta": {},
+  "models": { "mode": "merge", "providers": {} },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "before/model",
+        "fallbacks": []
+      },
+      "models": {}
+    },
+    "list": []
+  }
+}
+JSON
+
+backup_add_output=$(node bin/pinch.js --config "$backup_config" backup add)
+backup_path=$(printf '%s\n' "$backup_add_output" | sed -n 's/^Backup created: //p')
+test -n "$backup_path"
+backup_id=${backup_path##*.bak.}
+
+backup_list_output=$(node bin/pinch.js --config "$backup_config" backup list)
+printf '%s\n' "$backup_list_output" | grep 'BACKUP_ID' >/dev/null
+printf '%s\n' "$backup_list_output" | grep "$backup_id" >/dev/null
+
+backup_show_output=$(node bin/pinch.js --config "$backup_config" backup show "$backup_id")
+printf '%s\n' "$backup_show_output" | grep '"before/model"' >/dev/null
+
+backup_show_by_name_output=$(node bin/pinch.js --config "$backup_config" backup show "$(basename "$backup_path")")
+printf '%s\n' "$backup_show_by_name_output" | grep '"before/model"' >/dev/null
+
+perl -0pi -e 's/before\/model/after\/model/' "$backup_config"
+
+backup_restore_output=$(node bin/pinch.js --config "$backup_config" backup restore "$backup_id")
+printf '%s\n' "$backup_restore_output" | grep "Backup restored: $backup_path" >/dev/null
+current_backup_path=$(printf '%s\n' "$backup_restore_output" | sed -n 's/^Current config backup: //p')
+test -n "$current_backup_path"
+test -f "$current_backup_path"
+
+restored_primary=$(node -e "const fs=require('fs'); const c=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(c.agents.defaults.model.primary);" "$backup_config")
+if [ "$restored_primary" != 'before/model' ]; then
+  echo 'backup restore should recover original config content' >&2
+  exit 1
+fi
+
+backup_dry_run_output=$(node bin/pinch.js --config "$backup_config" --dry-run backup restore "$backup_id")
+printf '%s\n' "$backup_dry_run_output" | grep 'Dry run only. No files were changed.' >/dev/null
+
 port_file="$tmpdir/mock-model-port"
 server_script="$tmpdir/mock-model-server.js"
 discover_config="$tmpdir/discover.json"

@@ -9,6 +9,7 @@ const { stdin, stdout } = require('process');
 const DEFAULT_CONFIG_PATH = '~/.openclaw/openclaw.json';
 const DISCOVER_REQUEST_TIMEOUT_MS = 15000;
 const MODEL_TEST_REQUEST_TIMEOUT_MS = 30000;
+const BACKUP_TIMESTAMP_LENGTH = 14;
 const DEFAULT_TEST_PROMPT = 'Please reply with OK only.';
 const DEFAULT_MODEL_TEMPLATE = {
   reasoning: false,
@@ -22,9 +23,16 @@ const DEFAULT_MODEL_TEMPLATE = {
   contextWindow: 128000,
   maxTokens: 8192,
 };
-const SUPPORTED_COMMANDS = new Set(['add', 'list', 'del', 'search', 'test', 'default']);
+const SUPPORTED_COMMANDS = new Set(['add', 'list', 'del', 'search', 'test', 'default', 'backup']);
 const COMMAND_ALIASES = new Map([
   ['dafault', 'default'],
+]);
+const BACKUP_ACTIONS = new Set(['list', 'show', 'add', 'restore']);
+const BACKUP_ACTION_ALIASES = new Map([
+  ['ls', 'list'],
+  ['cat', 'show'],
+  ['view', 'show'],
+  ['create', 'add'],
 ]);
 
 async function main() {
@@ -37,6 +45,12 @@ async function main() {
     }
 
     const configPath = resolveHome(parsed.configPath || DEFAULT_CONFIG_PATH);
+
+    if (parsed.command === 'backup') {
+      await handleBackupCommand(parsed, configPath);
+      return;
+    }
+
     const config = await loadJson(configPath);
 
     if (parsed.command === 'list') {
@@ -116,6 +130,7 @@ function parseArgs(argv) {
   const options = {
     command: 'add',
     positionals: [],
+    backupAction: '',
     dryRun: false,
     discover: false,
     force: false,
@@ -180,6 +195,10 @@ function parseArgs(argv) {
     options.positionals.push(value);
   }
 
+  if (options.command === 'backup') {
+    normalizeBackupArgs(options);
+  }
+
   return options;
 }
 
@@ -196,6 +215,47 @@ function resolveCommandToken(value) {
   return COMMAND_ALIASES.get(normalized) || '';
 }
 
+function normalizeBackupArgs(options) {
+  const [firstPositional, ...restPositionals] = options.positionals;
+
+  if (!firstPositional) {
+    options.backupAction = 'list';
+    return;
+  }
+
+  const resolvedAction = resolveBackupActionToken(firstPositional);
+  if (resolvedAction) {
+    options.backupAction = resolvedAction;
+    options.positionals = restPositionals;
+    return;
+  }
+
+  if (looksLikeBackupSelector(firstPositional)) {
+    options.backupAction = 'show';
+    return;
+  }
+
+  const suggestion = findSuggestedBackupAction(firstPositional);
+  throw new Error(
+    suggestion
+      ? `Unknown backup action: ${firstPositional}. Did you mean "${suggestion}"?`
+      : `Unknown backup action: ${firstPositional}`,
+  );
+}
+
+function resolveBackupActionToken(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (BACKUP_ACTIONS.has(normalized)) {
+    return normalized;
+  }
+
+  return BACKUP_ACTION_ALIASES.get(normalized) || '';
+}
+
 function looksLikeBaseUrlToken(value) {
   const trimmed = String(value || '').trim();
   if (!trimmed) {
@@ -203,6 +263,20 @@ function looksLikeBaseUrlToken(value) {
   }
 
   return /:\/\//.test(trimmed) || /[./:]/.test(trimmed);
+}
+
+function looksLikeBackupSelector(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /^\d{14}(?:-\d+)?$/.test(trimmed)
+    || trimmed.includes('.bak.')
+    || trimmed.startsWith('~/')
+    || trimmed.startsWith('./')
+    || trimmed.startsWith('../')
+    || path.isAbsolute(trimmed);
 }
 
 function findSuggestedCommand(value) {
@@ -223,6 +297,26 @@ function findSuggestedCommand(value) {
   }
 
   return closestDistance <= 2 ? closestCommand : '';
+}
+
+function findSuggestedBackupAction(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  let closestAction = '';
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  for (const action of BACKUP_ACTIONS) {
+    const distance = computeLevenshteinDistance(normalized, action);
+    if (distance < closestDistance) {
+      closestAction = action;
+      closestDistance = distance;
+    }
+  }
+
+  return closestDistance <= 2 ? closestAction : '';
 }
 
 function computeLevenshteinDistance(left, right) {
@@ -879,6 +973,219 @@ async function saveConfig(filePath, config) {
   return backupPath;
 }
 
+async function handleBackupCommand(parsed, configPath) {
+  if (parsed.backupAction === 'list') {
+    ensureNoExtraBackupArgs(parsed, 'list');
+    const backups = await listBackupFiles(configPath);
+    printBackupList(backups, configPath);
+    return;
+  }
+
+  if (parsed.backupAction === 'show') {
+    const selector = collectBackupSelector(parsed, 'show');
+    const backup = await readBackupFile(configPath, selector);
+    printBackupContent(backup);
+    return;
+  }
+
+  if (parsed.backupAction === 'add') {
+    ensureNoExtraBackupArgs(parsed, 'add');
+    await assertFileExists(configPath, 'Config file');
+
+    if (parsed.dryRun) {
+      console.log('Dry run only. No files were changed.');
+      printBackupAddSummary(configPath, null);
+      return;
+    }
+
+    const backupPath = await writeBackup(configPath);
+    printBackupAddSummary(configPath, backupPath);
+    return;
+  }
+
+  if (parsed.backupAction === 'restore') {
+    const selector = collectBackupSelector(parsed, 'restore');
+    const result = await restoreBackupFile(configPath, selector, { dryRun: parsed.dryRun });
+
+    if (parsed.dryRun) {
+      console.log('Dry run only. No files were changed.');
+    }
+
+    printBackupRestoreSummary(result);
+    return;
+  }
+
+  throw new Error(`Unsupported backup action: ${parsed.backupAction}`);
+}
+
+function collectBackupSelector(parsed, actionName) {
+  const selector = String(parsed.positionals[0] || '').trim();
+  if (!selector) {
+    throw new Error(`Missing backup selector for backup ${actionName}`);
+  }
+
+  if (parsed.positionals.length > 1) {
+    throw new Error(`Too many arguments for backup ${actionName}`);
+  }
+
+  return selector;
+}
+
+function ensureNoExtraBackupArgs(parsed, actionName) {
+  if (parsed.positionals.length > 0) {
+    throw new Error(`backup ${actionName} does not accept extra arguments`);
+  }
+}
+
+async function listBackupFiles(configPath) {
+  const backupDirectory = path.dirname(configPath);
+  const backupPrefix = `${path.basename(configPath)}.bak.`;
+
+  let entries = [];
+  try {
+    entries = await fs.readdir(backupDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+
+  const backups = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith(backupPrefix))
+    .map(async (entry) => {
+      const filePath = path.join(backupDirectory, entry.name);
+      const stats = await fs.stat(filePath);
+      return {
+        id: entry.name.slice(backupPrefix.length),
+        fileName: entry.name,
+        filePath,
+        size: stats.size,
+        modifiedAt: stats.mtime.toISOString(),
+      };
+    }));
+
+  backups.sort((left, right) => {
+    const idOrder = right.id.localeCompare(left.id);
+    if (idOrder !== 0) {
+      return idOrder;
+    }
+    return right.fileName.localeCompare(left.fileName);
+  });
+
+  return backups;
+}
+
+async function readBackupFile(configPath, selector) {
+  const backupPath = await resolveBackupPath(configPath, selector);
+  const raw = await fs.readFile(backupPath, 'utf8');
+
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      backupPath,
+      content: JSON.stringify(parsed, null, 2),
+    };
+  } catch {
+    return {
+      backupPath,
+      content: raw,
+    };
+  }
+}
+
+async function restoreBackupFile(configPath, selector, options = {}) {
+  const backupPath = await resolveBackupPath(configPath, selector);
+  await loadJson(backupPath);
+
+  const currentConfigExists = await pathExists(configPath);
+
+  if (options.dryRun) {
+    return {
+      configPath,
+      backupPath,
+      currentBackupPath: null,
+      currentConfigExists,
+      dryRun: true,
+    };
+  }
+
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+
+  let currentBackupPath = null;
+  if (currentConfigExists) {
+    currentBackupPath = await writeBackup(configPath);
+  }
+
+  await fs.copyFile(backupPath, configPath);
+
+  return {
+    configPath,
+    backupPath,
+    currentBackupPath,
+    currentConfigExists,
+    dryRun: false,
+  };
+}
+
+async function resolveBackupPath(configPath, selector) {
+  const normalizedSelector = String(selector || '').trim();
+  if (!normalizedSelector) {
+    throw new Error('Missing backup selector');
+  }
+
+  const resolvedSelectorPath = resolveHome(normalizedSelector);
+  if (await pathExists(resolvedSelectorPath)) {
+    return resolvedSelectorPath;
+  }
+
+  const backups = await listBackupFiles(configPath);
+  const exactMatches = backups.filter((backup) => {
+    return backup.id === normalizedSelector
+      || backup.fileName === normalizedSelector
+      || backup.filePath === normalizedSelector;
+  });
+
+  if (exactMatches.length === 1) {
+    return exactMatches[0].filePath;
+  }
+
+  if (exactMatches.length > 1) {
+    throw new Error(`Multiple backups matched selector: ${normalizedSelector}`);
+  }
+
+  if (/^\d{14}$/.test(normalizedSelector)) {
+    const prefixMatches = backups.filter((backup) => backup.id === normalizedSelector || backup.id.startsWith(`${normalizedSelector}-`));
+
+    if (prefixMatches.length === 1) {
+      return prefixMatches[0].filePath;
+    }
+
+    if (prefixMatches.length > 1) {
+      throw new Error(`Multiple backups matched timestamp ${normalizedSelector}. Please use the full backup id.`);
+    }
+  }
+
+  throw new Error(`Backup not found: ${normalizedSelector}`);
+}
+
+async function assertFileExists(filePath, label) {
+  if (await pathExists(filePath)) {
+    return;
+  }
+
+  throw new Error(`${label} not found: ${filePath}`);
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function addModelToConfig(config, answers) {
   ensureConfigContainers(config);
 
@@ -1229,10 +1536,26 @@ function ensureAliasIsAvailable(modelMap, targetRef, alias) {
 }
 
 async function writeBackup(filePath) {
-  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
-  const backupPath = `${filePath}.bak.${timestamp}`;
+  const backupPath = await createUniqueBackupPath(filePath);
   await fs.copyFile(filePath, backupPath);
   return backupPath;
+}
+
+async function createUniqueBackupPath(filePath) {
+  let candidateTime = Date.now();
+
+  while (true) {
+    const backupPath = `${filePath}.bak.${formatBackupTimestamp(candidateTime)}`;
+    if (!(await pathExists(backupPath))) {
+      return backupPath;
+    }
+
+    candidateTime += 1000;
+  }
+}
+
+function formatBackupTimestamp(value) {
+  return new Date(value).toISOString().replace(/[-:.TZ]/g, '').slice(0, BACKUP_TIMESTAMP_LENGTH);
 }
 
 function resolveHome(targetPath) {
@@ -1290,6 +1613,86 @@ function printDefaultSummary(result, configPath, backupPath) {
   if (backupPath) {
     console.log(`Backup path: ${backupPath}`);
   }
+}
+
+function printBackupList(backups, configPath) {
+  console.log(`Config path: ${configPath}`);
+  console.log(`Backups found: ${backups.length}`);
+
+  if (backups.length === 0) {
+    console.log('No backup files found.');
+    return;
+  }
+
+  const columns = [
+    ['id', 'BACKUP_ID'],
+    ['size', 'SIZE'],
+    ['modifiedAt', 'MODIFIED_AT'],
+    ['filePath', 'PATH'],
+  ];
+
+  const rows = backups.map((backup) => ({
+    id: backup.id,
+    size: `${backup.size} B`,
+    modifiedAt: backup.modifiedAt,
+    filePath: backup.filePath,
+  }));
+
+  const widths = columns.map(([key, title]) => {
+    const rowWidths = rows.map((row) => getDisplayWidth(row[key]));
+    return Math.max(getDisplayWidth(title), ...rowWidths);
+  });
+
+  const formatRow = (row) => columns
+    .map(([key], index) => padDisplay(row[key], widths[index]))
+    .join('  ')
+    .replace(/\s+$/, '');
+
+  console.log(formatRow({
+    id: 'BACKUP_ID',
+    size: 'SIZE',
+    modifiedAt: 'MODIFIED_AT',
+    filePath: 'PATH',
+  }));
+  console.log(widths.map((width) => '-'.repeat(width)).join('  '));
+
+  for (const row of rows) {
+    console.log(formatRow(row));
+  }
+}
+
+function printBackupContent(backup) {
+  console.log(`Backup path: ${backup.backupPath}`);
+  console.log('Content:');
+  console.log(backup.content);
+}
+
+function printBackupAddSummary(configPath, backupPath) {
+  console.log(`Config path: ${configPath}`);
+
+  if (backupPath) {
+    console.log(`Backup created: ${backupPath}`);
+    return;
+  }
+
+  console.log('Backup would be created.');
+}
+
+function printBackupRestoreSummary(result) {
+  console.log(`Config path: ${result.configPath}`);
+  console.log(`${result.dryRun ? 'Backup to restore' : 'Backup restored'}: ${result.backupPath}`);
+
+  if (result.currentBackupPath) {
+    console.log(`Current config backup: ${result.currentBackupPath}`);
+    return;
+  }
+
+  if (result.currentConfigExists) {
+    console.log('Current config backup: dry-run');
+    return;
+  }
+
+  console.log('Current config backup: no');
 }
 
 function printTestSummary(result) {
@@ -1399,10 +1802,17 @@ function printHelp() {
   pinch del <模型别名或模型引用>
   pinch del
   pinch del --force <模型别名或模型引用>
+  pinch backup
+  pinch backup list
+  pinch backup show <备份时间戳|备份文件名|备份路径>
+  pinch backup add
+  pinch backup restore <备份时间戳|备份文件名|备份路径>
   pinch --config /path/to/openclaw.json --dry-run add
   pinch --config /path/to/openclaw.json --dry-run add --discover <base_url> <模型名称> <模型别名>
   pinch --config /path/to/openclaw.json --dry-run default <模型别名或模型引用>
   pinch --config /path/to/openclaw.json --dry-run del <模型别名或模型引用>
+  pinch --config /path/to/openclaw.json --dry-run backup add
+  pinch --config /path/to/openclaw.json --dry-run backup restore <备份时间戳|备份文件名|备份路径>
 
 示例:
   pinch add https://api.example.com/v1 sk-xxxx gpt-4.1 gpt41
@@ -1415,6 +1825,10 @@ function printHelp() {
   pinch list
   pinch del gpt41
   pinch del --force gpt41
+  pinch backup
+  pinch backup show 20260308123045
+  pinch backup add
+  pinch backup restore 20260308123045
 
 说明:
   - add 仅需输入 base_url、api_key、模型名称、模型别名
@@ -1424,10 +1838,12 @@ function printHelp() {
   - default 会按模型别名或模型引用切换 agents.defaults.model.primary
   - list 会从 models.providers、agents.defaults.models 和当前引用关系聚合模型，并标记当前默认模型
   - del 会按模型别名或模型引用删除 models.providers 和 agents.defaults.models 中对应条目
+  - backup 会列出、查看、创建并恢复当前配置文件对应的备份文件
   - 若模型正被 agents.defaults.model 或 agents.list[*].model 使用，del 会拒绝删除；可用 --force 覆盖
   - 若同一个 base_url + api_key 已存在，会复用现有 provider
   - 若 provider 不存在，会自动生成 provider id
-  - 写入前会自动备份 openclaw.json`);
+  - 写入前会自动备份 openclaw.json
+  - backup restore 恢复前会先再次备份当前 openclaw.json，避免覆盖现场`);
 }
 
 main();
